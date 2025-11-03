@@ -1,5 +1,5 @@
 [package]
-name = "ubuntu-desktop-manager"
+name = "manchatz-desktop-entry-manager"
 version = "0.1.0"
 edition = "2021"
 

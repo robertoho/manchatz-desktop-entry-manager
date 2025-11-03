@@ -6,7 +6,7 @@ mod ui;
 
 use ui::MainWindow;
 
-const APP_ID: &str = "com.ubuntu.DesktopManager";
+const APP_ID: &str = "com.manchatz.DesktopEntryManager";
 
 fn main() {
     let app = Application::builder()

@@ -18,7 +18,7 @@ impl MainWindow {
     pub fn new(app: &Application) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
-            .title("Ubuntu Desktop Manager")
+            .title("Manchatz Desktop Entry Manager")
             .default_width(1000)
             .default_height(600)
             .build();

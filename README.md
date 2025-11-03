@@ -1,10 +1,10 @@
-# Ubuntu Desktop Manager
+# Manchatz Desktop Entry Manager
 
 A GTK4-based desktop application manager for Linux systems that allows you to view, edit, create, and manage `.desktop` files - the standard way Linux applications are registered with the desktop environment.
 
 ## Overview
 
-Ubuntu Desktop Manager provides a user-friendly graphical interface to manage desktop entries for installed applications. It scans your system for `.desktop` files and allows you to:
+Manchatz Desktop Entry Manager provides a user-friendly graphical interface to manage desktop entries for installed applications. It scans your system for `.desktop` files and allows you to:
 
 - Browse all installed applications (system-wide and user-specific)
 - View and edit application properties (name, command, icon, description, etc.)
@@ -45,7 +45,7 @@ The application works with all major desktop environments, including:
 
 ### Package Manager Integration
 
-Ubuntu Desktop Manager automatically detects applications installed through various package managers:
+Manchatz Desktop Entry Manager automatically detects applications installed through various package managers:
 
 - **APT** (`.deb` packages) - Native Debian/Ubuntu packages
 - **Snap** - Scans `/var/lib/snapd/desktop/applications`
@@ -107,8 +107,8 @@ sudo pacman -S gtk4 base-devel
 
 3. **Clone and build**:
 ```bash
-git clone https://github.com/yourusername/ubuntu-desktop-manager.git
-cd ubuntu-desktop-manager
+git clone https://github.com/yourusername/manchatz-desktop-entry-manager.git
+cd manchatz-desktop-entry-manager
 cargo build --release
 ```
 
@@ -119,7 +119,7 @@ cargo run --release
 
 Or install the binary:
 ```bash
-sudo cp target/release/ubuntu-desktop-manager /usr/local/bin/
+sudo cp target/release/manchatz-desktop-entry-manager /usr/local/bin/
 ```
 
 ## Usage
@@ -164,7 +164,7 @@ This is particularly useful for:
 To edit system-wide applications that require elevated privileges, you can run:
 
 ```bash
-sudo -E ubuntu-desktop-manager
+sudo -E manchatz-desktop-entry-manager
 ```
 
 **Warning**: Be cautious when editing system files. Incorrect modifications may prevent applications from launching properly.
@@ -235,7 +235,7 @@ ls /var/lib/flatpak/exports/share/applications/  # For Flatpak
 ### Can't edit system applications
 System applications require elevated privileges. Run with sudo:
 ```bash
-sudo -E ubuntu-desktop-manager
+sudo -E manchatz-desktop-entry-manager
 ```
 
 ## Future Enhancements
@@ -248,4 +248,3 @@ Potential features for future releases:
 - Undo/redo functionality
 - Application icon theme browser
 - Categories management with predefined options
-# manchatz-desktop-entry-manager
