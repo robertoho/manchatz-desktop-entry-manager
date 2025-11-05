@@ -4,11 +4,23 @@ use gtk4::{
     ScrolledWindow, CheckButton, Paned, FileChooserDialog, FileChooserAction, FileFilter,
     ResponseType, Image,
 };
+use gtk4::gio;
+use gtk4::glib::clone::Downgrade;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::env;
 
 use crate::desktop_file::{scan_desktop_files, DesktopEntry};
+
+#[derive(Clone)]
+struct MimeChoice {
+    extension: String,
+    mime_type: String,
+    description: String,
+}
 
 pub struct MainWindow {
     window: ApplicationWindow,
@@ -148,6 +160,32 @@ impl MainWindow {
         categories_box.append(&categories_entry);
         editor_box.append(&categories_box);
 
+        // File association management
+        let mime_box = GtkBox::new(Orientation::Vertical, 5);
+        let mime_label = Label::new(Some("Associated file types:"));
+        mime_label.set_halign(gtk4::Align::Start);
+
+        let mime_scrolled = ScrolledWindow::builder()
+            .min_content_height(60)
+            .max_content_height(140)
+            .hexpand(true)
+            .vexpand(false)
+            .build();
+
+        let mime_list = ListBox::new();
+        mime_list.set_selection_mode(gtk4::SelectionMode::None);
+        mime_scrolled.set_child(Some(&mime_list));
+
+        let mime_buttons_box = GtkBox::new(Orientation::Horizontal, 5);
+        let add_mime_button = Button::with_label("Add file association...");
+        add_mime_button.set_sensitive(false);
+        mime_buttons_box.append(&add_mime_button);
+
+        mime_box.append(&mime_label);
+        mime_box.append(&mime_scrolled);
+        mime_box.append(&mime_buttons_box);
+        editor_box.append(&mime_box);
+
         // Terminal checkbox
         let terminal_check = CheckButton::with_label("Run in terminal");
         editor_box.append(&terminal_check);
@@ -195,6 +233,12 @@ impl MainWindow {
         // Store current selection
         let current_entry: Rc<RefCell<Option<DesktopEntry>>> = Rc::new(RefCell::new(None));
         let current_row_widget: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+        let mime_types_state: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let mime_extensions_state: Rc<RefCell<HashMap<String, String>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let known_mime_choices = Rc::new(load_known_extensions());
+        let known_mime_map: Rc<RefCell<HashMap<String, String>>> =
+            Rc::new(RefCell::new(build_mime_extension_map(&known_mime_choices)));
 
         // Load desktop files
         let entries = scan_desktop_files();
@@ -236,6 +280,11 @@ impl MainWindow {
         let exec_browse_button_perm = exec_browse_button.clone();
         let icon_browse_button_perm = icon_browse_button.clone();
         let readonly_icon_clone = readonly_icon.clone();
+        let mime_list_clone = mime_list.clone();
+        let mime_types_state_clone = mime_types_state.clone();
+        let mime_extensions_state_clone = mime_extensions_state.clone();
+        let add_mime_button_perm = add_mime_button.clone();
+        let known_mime_map_clone = known_mime_map.clone();
 
         list_box.connect_row_selected(move |_, row| {
             if let Some(row) = row {
@@ -256,6 +305,37 @@ impl MainWindow {
                     // Update icon preview
                     update_icon_preview(&icon_preview_clone, &entry.icon);
 
+                    {
+                        let mut state = mime_types_state_clone.borrow_mut();
+                        state.clear();
+                        state.extend(entry.mime_types.iter().cloned());
+                    }
+                    {
+                        let mut ext_state = mime_extensions_state_clone.borrow_mut();
+                        ext_state.clear();
+                        for (mime, ext) in &entry.mime_extensions {
+                            ext_state.insert(mime.clone(), ext.clone());
+                        }
+                    }
+                    clear_list_box(&mime_list_clone);
+                    let existing_mimes: Vec<String> = mime_types_state_clone.borrow().clone();
+                    for mime in existing_mimes {
+                        let extension_owned = if let Some(ext) =
+                            mime_extensions_state_clone.borrow().get(&mime).cloned()
+                        {
+                            Some(ext)
+                        } else {
+                            known_mime_map_clone.borrow().get(&mime).cloned()
+                        };
+                        append_mime_row(
+                            &mime_list_clone,
+                            &mime,
+                            extension_owned.as_deref(),
+                            mime_types_state_clone.clone(),
+                            mime_extensions_state_clone.clone(),
+                        );
+                    }
+
                     *current_entry_clone.borrow_mut() = Some(entry.clone());
                     *current_row_widget_clone.borrow_mut() = Some(widget.clone());
 
@@ -271,6 +351,7 @@ impl MainWindow {
                     delete_button_perm.set_sensitive(can_write);
                     exec_browse_button_perm.set_sensitive(can_write);
                     icon_browse_button_perm.set_sensitive(can_write);
+                    add_mime_button_perm.set_sensitive(can_write);
 
                     // Show/hide readonly icon
                     readonly_icon_clone.set_visible(!can_write);
@@ -291,6 +372,8 @@ impl MainWindow {
         let comment_entry_clone = comment_entry.clone();
         let categories_entry_clone = categories_entry.clone();
         let terminal_check_clone = terminal_check.clone();
+        let mime_types_state_clone = mime_types_state.clone();
+        let mime_extensions_state_clone = mime_extensions_state.clone();
 
         save_button.connect_clicked(move |_| {
             if let Some(ref mut entry) = *current_entry_clone.borrow_mut() {
@@ -300,6 +383,8 @@ impl MainWindow {
                 entry.comment = comment_entry_clone.text().to_string();
                 entry.categories = categories_entry_clone.text().to_string();
                 entry.terminal = terminal_check_clone.is_active();
+                entry.mime_types = mime_types_state_clone.borrow().clone();
+                entry.mime_extensions = mime_extensions_state_clone.borrow().clone();
 
                 match entry.save() {
                     Ok(_) => {
@@ -372,6 +457,10 @@ impl MainWindow {
         let path_display_clone = path_display.clone();
         let current_entry_clone = current_entry.clone();
         let list_box_clone = list_box.clone();
+        let mime_list_clone = mime_list.clone();
+        let mime_types_state_clone = mime_types_state.clone();
+        let mime_extensions_state_clone = mime_extensions_state.clone();
+        let add_mime_button_clone = add_mime_button.clone();
 
         new_entry_button.connect_clicked(move |_| {
             // Create a new desktop entry
@@ -392,6 +481,8 @@ impl MainWindow {
                 terminal: false,
                 categories: String::from(""),
                 entry_type: String::from("Application"),
+                mime_types: Vec::new(),
+                mime_extensions: HashMap::new(),
             };
 
             // Clear list selection
@@ -409,9 +500,38 @@ impl MainWindow {
             terminal_check_clone.set_active(new_entry.terminal);
             path_display_clone.set_text(&new_entry.path.display().to_string());
 
+            {
+                mime_types_state_clone.borrow_mut().clear();
+            }
+            {
+                mime_extensions_state_clone.borrow_mut().clear();
+            }
+            clear_list_box(&mime_list_clone);
+            add_mime_button_clone.set_sensitive(true);
+
             *current_entry_clone.borrow_mut() = Some(new_entry);
 
             println!("New entry created. Fill in the details and click Save Changes.");
+        });
+
+        // File association button handler
+        let window_clone = window.clone();
+        let mime_list_clone = mime_list.clone();
+        let mime_types_state_clone = mime_types_state.clone();
+        let mime_extensions_state_clone = mime_extensions_state.clone();
+        let current_entry_clone = current_entry.clone();
+        let known_mime_choices_clone = known_mime_choices.clone();
+        let known_mime_map_clone_2 = known_mime_map.clone();
+        add_mime_button.connect_clicked(move |_| {
+            show_mime_selection_dialog(
+                &window_clone,
+                known_mime_choices_clone.clone(),
+                known_mime_map_clone_2.clone(),
+                mime_types_state_clone.clone(),
+                mime_extensions_state_clone.clone(),
+                &mime_list_clone,
+                current_entry_clone.clone(),
+            );
         });
 
         // Command/Exec browse button handler
@@ -586,6 +706,601 @@ fn update_row_icon(row_widget: &Rc<RefCell<Option<gtk4::Widget>>>, icon_name: &s
             }
         }
     }
+}
+
+fn clear_list_box(list: &ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
+fn add_mime_association(
+    mime_type: &str,
+    extension: Option<&str>,
+    state: &Rc<RefCell<Vec<String>>>,
+    extensions_state: &Rc<RefCell<HashMap<String, String>>>,
+    list: &ListBox,
+) -> bool {
+    if state
+        .borrow()
+        .iter()
+        .any(|existing| existing == mime_type)
+    {
+        return false;
+    }
+
+    state.borrow_mut().push(mime_type.to_string());
+    if let Some(ext) = extension {
+        extensions_state
+            .borrow_mut()
+            .insert(mime_type.to_string(), ext.to_string());
+    }
+
+    let ext_for_row = extension
+        .map(|value| value.to_string())
+        .or_else(|| extensions_state.borrow().get(mime_type).cloned())
+        .filter(|value| !value.is_empty());
+
+    append_mime_row(
+        list,
+        mime_type,
+        ext_for_row.as_deref(),
+        state.clone(),
+        extensions_state.clone(),
+    );
+    true
+}
+
+fn row_string_data(row: &gtk4::ListBoxRow, key: &str) -> Option<String> {
+    unsafe { row.data::<String>(key).map(|ptr| ptr.as_ref().clone()) }
+}
+
+fn add_mime_from_row(
+    row: &gtk4::ListBoxRow,
+    state: &Rc<RefCell<Vec<String>>>,
+    list: &ListBox,
+    current_entry: &Rc<RefCell<Option<DesktopEntry>>>,
+    known_map: &Rc<RefCell<HashMap<String, String>>>,
+    extensions_state: &Rc<RefCell<HashMap<String, String>>>,
+) {
+    if let Some(mime_value) = row_string_data(row, "mime-type") {
+        let extension_value = row_string_data(row, "extension");
+        let extension_opt = extension_value
+            .as_ref()
+            .and_then(|value| if value.is_empty() { None } else { Some(value.as_str()) });
+
+        let mut map = known_map.borrow_mut();
+        if let Some(ext_str) = extension_opt {
+            map.entry(mime_value.clone()).or_insert_with(|| ext_str.to_string());
+        }
+
+        let resolved_extension = extension_opt.or_else(|| map.get(&mime_value).map(|s| s.as_str()));
+
+        if add_mime_association(
+            &mime_value,
+            resolved_extension,
+            state,
+            extensions_state,
+            list,
+        ) {
+            if let Some(ref mut entry) = *current_entry.borrow_mut() {
+                entry.mime_types = state.borrow().clone();
+                entry.mime_extensions = extensions_state.borrow().clone();
+            }
+
+            let display_extension = resolved_extension.unwrap_or("-");
+            println!(
+                "Added file association '{}' ({})",
+                mime_value,
+                display_extension
+            );
+        } else {
+            println!(
+                "File association '{}' already exists",
+                mime_value
+            );
+        }
+    }
+}
+
+fn try_add_manual_mime(
+    entry: &Entry,
+    state: &Rc<RefCell<Vec<String>>>,
+    list: &ListBox,
+    current_entry: &Rc<RefCell<Option<DesktopEntry>>>,
+    known_map: &Rc<RefCell<HashMap<String, String>>>,
+    extensions_state: &Rc<RefCell<HashMap<String, String>>>,
+) {
+    let input = entry.text().to_string();
+
+    match resolve_mime_from_input(&input) {
+        Some((mime, display_hint)) => {
+            let extension_opt = if display_hint.is_empty() {
+                None
+            } else {
+                Some(display_hint.as_str())
+            };
+
+            let mut map = known_map.borrow_mut();
+            if let Some(ext_str) = extension_opt {
+                map.entry(mime.clone()).or_insert_with(|| ext_str.to_string());
+            }
+            let resolved_extension = extension_opt
+                .or_else(|| map.get(&mime).map(|value| value.as_str()));
+
+            if add_mime_association(
+                &mime,
+                resolved_extension,
+                state,
+                extensions_state,
+                list,
+            ) {
+                if let Some(ref mut entry_ref) = *current_entry.borrow_mut() {
+                    entry_ref.mime_types = state.borrow().clone();
+                    entry_ref.mime_extensions = extensions_state.borrow().clone();
+                }
+
+                println!(
+                    "Added file association '{}' ({})",
+                    mime,
+                    resolved_extension.unwrap_or("-")
+                );
+            } else {
+                println!(
+                    "File association '{}' already exists",
+                    mime
+                );
+            }
+        }
+        None => {
+            if !input.trim().is_empty() {
+                println!(
+                    "Unable to determine MIME type from '{}'",
+                    input.trim()
+                );
+            }
+        }
+    }
+
+    entry.set_text("");
+}
+
+fn append_mime_row(
+    list: &ListBox,
+    mime_type: &str,
+    extension: Option<&str>,
+    state: Rc<RefCell<Vec<String>>>,
+    extensions_state: Rc<RefCell<HashMap<String, String>>>,
+) {
+    let row = gtk4::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_activatable(false);
+
+    let row_box = GtkBox::new(Orientation::Horizontal, 5);
+
+    let extension_owned = extension.unwrap_or("").to_string();
+    let ext_display = if extension_owned.is_empty() {
+        "—"
+    } else {
+        extension_owned.as_str()
+    };
+
+    let ext_label = Label::new(Some(ext_display));
+    ext_label.add_css_class("monospace");
+    ext_label.set_width_chars(6);
+    ext_label.set_halign(gtk4::Align::Start);
+
+    let label = Label::new(Some(mime_type));
+    label.set_halign(gtk4::Align::Start);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+
+    let remove_button = Button::with_label("Remove");
+    remove_button.add_css_class("flat");
+    remove_button.set_halign(gtk4::Align::End);
+
+    row_box.append(&ext_label);
+    row_box.append(&label);
+    row_box.append(&remove_button);
+    row.set_child(Some(&row_box));
+    list.append(&row);
+
+    unsafe {
+        row.set_data("mime-type", mime_type.to_string());
+        row.set_data("extension", extension_owned.clone());
+    }
+
+    let mime_value = mime_type.to_string();
+    let state_clone = state.clone();
+    let extensions_state_clone = extensions_state.clone();
+    let list_weak = Downgrade::downgrade(&list);
+    let row_weak = Downgrade::downgrade(&row);
+
+    remove_button.connect_clicked(move |_| {
+        state_clone
+            .borrow_mut()
+            .retain(|existing| existing != &mime_value);
+        extensions_state_clone.borrow_mut().remove(&mime_value);
+
+        if let (Some(list_box), Some(row_widget)) = (list_weak.upgrade(), row_weak.upgrade()) {
+            list_box.remove(&row_widget);
+        }
+    });
+}
+
+fn resolve_mime_from_input(input: &str) -> Option<(String, String)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains('/') {
+        return Some((trimmed.to_string(), String::new()));
+    }
+
+    let sanitized = trimmed.trim_start_matches('.');
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    let filename = format!("dummy.{}", sanitized);
+    let path = std::path::Path::new(&filename);
+    let (content_type, uncertain) = gio::content_type_guess(Some(path), &[]);
+
+    if let Some(mime) = gio::content_type_get_mime_type(content_type.as_str()) {
+        return Some((mime.to_string(), format!(".{}", sanitized)));
+    }
+
+    if !uncertain {
+        return Some((content_type.to_string(), format!(".{}", sanitized)));
+    }
+
+    Some((
+        format!("application/x-{}", sanitized.to_lowercase()),
+        format!(".{}", sanitized),
+    ))
+}
+
+fn build_mime_extension_map(choices: &[MimeChoice]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for choice in choices {
+        map.entry(choice.mime_type.clone())
+            .or_insert_with(|| choice.extension.clone());
+    }
+    map
+}
+
+fn load_known_extensions() -> Vec<MimeChoice> {
+    let mut map: HashMap<String, (String, u32)> = HashMap::new();
+
+    for path in mime_database_paths() {
+        if let Ok(file) = File::open(&path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().flatten() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+
+                let mut parts = trimmed.splitn(3, ':');
+                let weight_str = parts.next().unwrap_or("0");
+                let mime = parts.next().unwrap_or("").trim();
+                let pattern = parts.next().unwrap_or("").trim();
+
+                if mime.is_empty() || pattern.is_empty() {
+                    continue;
+                }
+
+                if let Some(extension) = extract_extension_from_pattern(pattern) {
+                    let weight = weight_str.parse::<u32>().unwrap_or(0);
+                    let entry = map
+                        .entry(extension.clone())
+                        .or_insert_with(|| (mime.to_string(), weight));
+
+                    if weight >= entry.1 {
+                        *entry = (mime.to_string(), weight);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut choices = Vec::new();
+    for (extension, (mime, _weight)) in map {
+        let description = mime_description(&mime);
+        choices.push(MimeChoice {
+            extension: format!(".{}", extension),
+            mime_type: mime,
+            description,
+        });
+    }
+
+    choices.sort_by(|a, b| a.extension.cmp(&b.extension));
+    choices
+}
+
+fn mime_database_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+
+    if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
+        if !xdg_data_home.is_empty() {
+            push_unique_path(&mut paths, format!(
+                "{}/mime/globs2",
+                xdg_data_home.trim_end_matches('/')
+            ));
+        }
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        push_unique_path(&mut paths, format!("{}/.local/share/mime/globs2", home));
+    }
+
+    if let Ok(xdg_dirs) = env::var("XDG_DATA_DIRS") {
+        for dir in xdg_dirs.split(':') {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                push_unique_path(&mut paths, format!("{}/mime/globs2", trimmed.trim_end_matches('/')));
+            }
+        }
+    }
+
+    push_unique_path(&mut paths, String::from("/usr/local/share/mime/globs2"));
+    push_unique_path(&mut paths, String::from("/usr/share/mime/globs2"));
+
+    paths
+}
+
+fn push_unique_path(paths: &mut Vec<String>, candidate: String) {
+    if !paths.contains(&candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn extract_extension_from_pattern(pattern: &str) -> Option<String> {
+    if !pattern.starts_with("*.") {
+        return None;
+    }
+
+    let ext = &pattern[2..];
+    if ext.is_empty() {
+        return None;
+    }
+
+    if ext.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '!')) {
+        return None;
+    }
+
+    Some(ext.to_lowercase())
+}
+
+fn mime_description(mime: &str) -> String {
+    if let Some(content_type) = gio::content_type_from_mime_type(mime) {
+        let description = gio::content_type_get_description(content_type.as_str());
+        let value = description.to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+
+    mime.to_string()
+}
+
+fn show_mime_selection_dialog(
+    parent: &ApplicationWindow,
+    known_choices: Rc<Vec<MimeChoice>>,
+    known_map: Rc<RefCell<HashMap<String, String>>>,
+    mime_state: Rc<RefCell<Vec<String>>>,
+    extension_state: Rc<RefCell<HashMap<String, String>>>,
+    mime_list: &ListBox,
+    current_entry: Rc<RefCell<Option<DesktopEntry>>>,
+) {
+    let dialog = gtk4::Dialog::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title("Add File Association")
+        .default_width(520)
+        .default_height(480)
+        .build();
+
+    dialog.add_button("Close", ResponseType::Close);
+
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+
+    let filter_entry = Entry::builder()
+        .placeholder_text("Search by extension, description, or MIME type")
+        .build();
+    content.append(&filter_entry);
+
+    let scrolled = ScrolledWindow::builder()
+        .min_content_height(260)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+
+    let list_box = ListBox::new();
+    list_box.set_selection_mode(gtk4::SelectionMode::Browse);
+    scrolled.set_child(Some(&list_box));
+    content.append(&scrolled);
+
+    if known_choices.is_empty() {
+        let empty_label = Label::new(Some("No known file types available. Use manual input below."));
+        empty_label.set_halign(gtk4::Align::Start);
+        empty_label.add_css_class("dim-label");
+        content.append(&empty_label);
+    }
+
+    let select_box = GtkBox::new(Orientation::Horizontal, 6);
+    select_box.set_hexpand(true);
+
+    let hint_label = Label::new(Some("Double-click a row or use \"Add Selected\"."));
+    hint_label.set_halign(gtk4::Align::Start);
+    hint_label.set_hexpand(true);
+    hint_label.add_css_class("dim-label");
+    select_box.append(&hint_label);
+
+    let add_selected_button = Button::with_label("Add Selected");
+    add_selected_button.set_sensitive(false);
+    add_selected_button.set_halign(gtk4::Align::End);
+    select_box.append(&add_selected_button);
+
+    content.append(&select_box);
+
+    let manual_box = GtkBox::new(Orientation::Horizontal, 6);
+    manual_box.set_hexpand(true);
+
+    let manual_entry = Entry::builder()
+        .placeholder_text("Enter extension (e.g. .txt) or MIME type")
+        .build();
+    manual_entry.set_hexpand(true);
+    manual_box.append(&manual_entry);
+
+    let manual_add_button = Button::with_label("Add From Text");
+    manual_box.append(&manual_add_button);
+
+    content.append(&manual_box);
+
+    for choice in known_choices.iter() {
+        let row = gtk4::ListBoxRow::new();
+        row.set_activatable(true);
+        row.set_selectable(true);
+
+        unsafe {
+            row.set_data("mime-type", choice.mime_type.clone());
+            row.set_data("extension", choice.extension.clone());
+            row.set_data("description", choice.description.clone());
+        }
+
+        let row_box = GtkBox::new(Orientation::Horizontal, 10);
+        row_box.set_hexpand(true);
+
+        let ext_label = Label::new(Some(&choice.extension));
+        ext_label.add_css_class("monospace");
+        ext_label.set_width_chars(8);
+        ext_label.set_halign(gtk4::Align::Start);
+
+        let description_label = Label::new(Some(&choice.description));
+        description_label.set_halign(gtk4::Align::Start);
+        description_label.set_hexpand(true);
+        description_label.set_wrap(true);
+
+        let mime_label = Label::new(Some(choice.mime_type.as_str()));
+        mime_label.add_css_class("dim-label");
+        mime_label.set_halign(gtk4::Align::End);
+
+        row_box.append(&ext_label);
+        row_box.append(&description_label);
+        row_box.append(&mime_label);
+
+        row.set_child(Some(&row_box));
+        list_box.append(&row);
+    }
+
+    let list_box_for_filter = list_box.clone();
+    filter_entry.connect_changed(move |entry| {
+        let query = entry.text().to_lowercase();
+        let mut child = list_box_for_filter.first_child();
+        while let Some(widget) = child {
+            if let Some(row) = widget.downcast_ref::<gtk4::ListBoxRow>() {
+                let extension = row_string_data(row, "extension")
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let description = row_string_data(row, "description")
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let mime = row_string_data(row, "mime-type")
+                    .unwrap_or_default()
+                    .to_lowercase();
+
+                let matches = query.is_empty()
+                    || extension.contains(&query)
+                    || description.contains(&query)
+                    || mime.contains(&query);
+                row.set_visible(matches);
+            }
+            child = widget.next_sibling();
+        }
+    });
+
+    let add_selected_button_clone = add_selected_button.clone();
+    list_box.connect_row_selected(move |_, row| {
+        add_selected_button_clone.set_sensitive(row.is_some());
+    });
+
+    let state_for_activation = mime_state.clone();
+    let list_for_activation = mime_list.clone();
+    let entry_for_activation = current_entry.clone();
+    let map_for_activation = known_map.clone();
+    let extensions_for_activation = extension_state.clone();
+    list_box.connect_row_activated(move |_, row| {
+        add_mime_from_row(
+            row,
+            &state_for_activation,
+            &list_for_activation,
+            &entry_for_activation,
+            &map_for_activation,
+            &extensions_for_activation,
+        );
+    });
+
+    let list_for_button = list_box.clone();
+    let state_for_button = mime_state.clone();
+    let mime_list_for_button = mime_list.clone();
+    let entry_for_button = current_entry.clone();
+    let map_for_button = known_map.clone();
+    let extensions_for_button = extension_state.clone();
+    add_selected_button.connect_clicked(move |_| {
+        if let Some(row) = list_for_button.selected_row() {
+            add_mime_from_row(
+                &row,
+                &state_for_button,
+                &mime_list_for_button,
+                &entry_for_button,
+                &map_for_button,
+                &extensions_for_button,
+            );
+        }
+    });
+
+    let state_for_manual = mime_state.clone();
+    let mime_list_for_manual = mime_list.clone();
+    let entry_for_manual = current_entry.clone();
+    let map_for_manual = known_map.clone();
+    let extensions_for_manual = extension_state.clone();
+    let manual_entry_button = manual_entry.clone();
+    manual_add_button.connect_clicked(move |_| {
+        try_add_manual_mime(
+            &manual_entry_button,
+            &state_for_manual,
+            &mime_list_for_manual,
+            &entry_for_manual,
+            &map_for_manual,
+            &extensions_for_manual,
+        );
+    });
+
+    let state_for_entry = mime_state.clone();
+    let mime_list_for_entry = mime_list.clone();
+    let entry_for_entry = current_entry.clone();
+    let map_for_entry = known_map.clone();
+    let extensions_for_entry = extension_state.clone();
+    manual_entry.connect_activate(move |entry| {
+        try_add_manual_mime(
+            entry,
+            &state_for_entry,
+            &mime_list_for_entry,
+            &entry_for_entry,
+            &map_for_entry,
+            &extensions_for_entry,
+        );
+    });
+
+    dialog.connect_response(|dialog, _| dialog.close());
+    dialog.show();
 }
 
 fn create_list_row(name: &str, comment: &str, icon_name: &str) -> GtkBox {
